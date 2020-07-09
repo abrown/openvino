@@ -39,22 +39,22 @@ fn link_libraries(openvino_lib_dir: &str) {
     //println!("cargo:rustc-link-lib=static=inference_engine_s");
 
     // Dynamically link in OpenVINO's inference engine (and dependencies).
-    println!("cargo:rustc-link-lib=inference_engine");
-    println!("cargo:rustc-link-lib=inference_engine_legacy");
-    println!("cargo:rustc-link-lib=inference_engine_transformations");
-    println!("cargo:rustc-link-lib=ngraph_backend");
-    println!("cargo:rustc-link-lib=ngraph_test_util");
-    println!("cargo:rustc-link-lib=ngraph");
+    println!("cargo:rustc-link-lib=dylib=inference_engine");
+    println!("cargo:rustc-link-lib=dylib=inference_engine_legacy");
+    println!("cargo:rustc-link-lib=dylib=inference_engine_transformations");
+    println!("cargo:rustc-link-lib=dylib=ngraph_backend");
+    println!("cargo:rustc-link-lib=dylib=ngraph_test_util");
+    println!("cargo:rustc-link-lib=dylib=ngraph");
     // is this needed?: println!("cargo:rustc-link-args=-Wl,-rpath,{}", openvino_lib_dir);
 
     // Dynamically link in libtbb (currently required on system). (TODO make static, see inference-engine/cmake/ie_parallel.cmake:51)
     add_library_path("../../temp/tbb/lib");
-    println!("cargo:rustc-link-lib=tbb");
-    println!("cargo:rustc-link-lib=tbbmalloc");
+    println!("cargo:rustc-link-lib=dylib=tbb");
+    println!("cargo:rustc-link-lib=dylib=tbbmalloc");
 
     // Statically link in libittnotify. TODO find this more conveniently, see inference-engine/cmake/FindITT.cmake
     add_library_path("/opt/intel/vtune_profiler_2020.1.0.607630/lib64");
-    println!("cargo:rustc-link-lib=ittnotify");
+    println!("cargo:rustc-link-lib=dylib=ittnotify");
 }
 
 /// Add a path to the set of searchable paths Cargo uses for finding libraries to link to.
