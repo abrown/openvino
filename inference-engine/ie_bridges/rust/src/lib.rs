@@ -7,8 +7,8 @@ use cxx::UniquePtr;
 mod ffi {
     extern "C" {
         include!("src/bridge.h");
+
         type Core;
-        type CNNNetwork;
         pub fn core_new(xml_config_file: &str) -> UniquePtr<Core>;
         pub fn core_new_default() -> UniquePtr<Core>;
         pub fn read_network(
@@ -16,6 +16,9 @@ mod ffi {
             model_path: &str,
             bin_path: &str,
         ) -> UniquePtr<CNNNetwork>;
+
+        type CNNNetwork;
+        pub fn set_batch_size(network: UniquePtr<CNNNetwork>, size: usize);
     }
 }
 
@@ -36,11 +39,20 @@ impl Core {
     }
 
     pub fn read_network(self, model_path: &str, bin_path: &str) -> CNNNetwork {
-        ffi::read_network(self.instance, model_path, bin_path)
+        let instance = ffi::read_network(self.instance, model_path, bin_path);
+        CNNNetwork { instance }
     }
 }
 
-type CNNNetwork = UniquePtr<ffi::CNNNetwork>;
+pub struct CNNNetwork {
+    instance: UniquePtr<ffi::CNNNetwork>,
+}
+
+impl CNNNetwork {
+    pub fn set_batch_size(self, size: usize) {
+        ffi::set_batch_size(self.instance, size)
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -62,5 +74,16 @@ mod test {
             &dir.join("frozen_inference_graph.xml").to_string_lossy(),
             &dir.join("frozen_inference_graph.bin").to_string_lossy(),
         );
+    }
+
+    #[test]
+    fn set_batch_size() {
+        let core = Core::new(None);
+        let dir = Path::new("../../../../test-openvino/");
+        let network = core.read_network(
+            &dir.join("frozen_inference_graph.xml").to_string_lossy(),
+            &dir.join("frozen_inference_graph.bin").to_string_lossy(),
+        );
+        network.set_batch_size(1);
     }
 }
