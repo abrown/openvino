@@ -5,15 +5,15 @@ fn main() {
     // Note which files will trigger a rebuild.
     mark_rerun_files();
 
-    // Link libraries.
-    let openvino_lib_dir = "../../../bin/intel64/Release/lib";
-    link_libraries(openvino_lib_dir);
-
     // Use cxx to compile the library; see https://github.com/dtolnay/cxx/blob/master/demo-rs/build.rs.
     cxx_build::bridge("src/lib.rs")
         .include("../../include") // The location of the OpenVINO headers.
         .flag_if_supported("-std=c++14")
         .compile("ffi");
+
+    // Link libraries.
+    let openvino_lib_dir = "../../../bin/intel64/Release/lib";
+    link_libraries(openvino_lib_dir);
 
     // Copy in the plugins.xml file.
     copy_openvino_plugin_file(openvino_lib_dir);
@@ -35,7 +35,7 @@ fn link_libraries(openvino_lib_dir: &str) {
     add_library_path(openvino_lib_dir);
 
     // Statically link in OpenVINO's inference engine (and dependencies).
-    println!("cargo:rustc-link-lib=static=pugixml");
+    println!("cargo:rustc-link-lib=dylib=pugixml");
     //println!("cargo:rustc-link-lib=static=inference_engine_s");
 
     // Dynamically link in OpenVINO's inference engine (and dependencies).
