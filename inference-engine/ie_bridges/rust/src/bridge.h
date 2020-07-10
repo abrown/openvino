@@ -17,8 +17,4 @@ std::unique_ptr<InferenceEngine::CNNNetwork> read_network(std::unique_ptr<Infere
     return std::make_unique<InferenceEngine::CNNNetwork>(core->ReadNetwork(std::string(modelPath), std::string(binPath)));
 }
 
-void set_batch_size(std::unique_ptr<InferenceEngine::CNNNetwork> network, const size_t size) {
-    network->setBatchSize(size);
-}
-
 #endif //OPENVINO_BRIDGE_H

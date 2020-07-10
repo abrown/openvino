@@ -18,7 +18,7 @@ mod ffi {
         ) -> UniquePtr<CNNNetwork>;
 
         type CNNNetwork;
-        pub fn set_batch_size(network: UniquePtr<CNNNetwork>, size: usize);
+        pub fn setBatchSize(self: &mut CNNNetwork, size: usize);
     }
 }
 
@@ -49,8 +49,8 @@ pub struct CNNNetwork {
 }
 
 impl CNNNetwork {
-    pub fn set_batch_size(self, size: usize) {
-        ffi::set_batch_size(self.instance, size)
+    pub fn set_batch_size(&mut self, size: usize) {
+        self.instance.setBatchSize(size)
     }
 }
 
@@ -76,11 +76,12 @@ mod test {
         );
     }
 
+    // FIXME this test relies on a pre-built model in the filesystem--avoid this.
     #[test]
     fn set_batch_size() {
         let core = Core::new(None);
         let dir = Path::new("../../../../test-openvino/");
-        let network = core.read_network(
+        let mut network = core.read_network(
             &dir.join("frozen_inference_graph.xml").to_string_lossy(),
             &dir.join("frozen_inference_graph.bin").to_string_lossy(),
         );
