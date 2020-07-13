@@ -3,7 +3,7 @@ use std::path::Path;
 
 fn main() {
     // FIXME this relies on the OpenVINO file structure to retrieve a plugins.xml file.
-    let core = Core::new(Some("../../../bin/intel64/Release/lib/plugins.xml"));
+    let mut core = Core::new(Some("../../../bin/intel64/Release/lib/plugins.xml"));
     // FIXME this relies on a pre-built model currently stored in the filesystem.
     let dir = Path::new("../../../../test-openvino/")
         .canonicalize()

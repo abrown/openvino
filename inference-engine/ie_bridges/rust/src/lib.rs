@@ -12,13 +12,23 @@ mod ffi {
         pub fn core_new(xml_config_file: &str) -> UniquePtr<Core>;
         pub fn core_new_default() -> UniquePtr<Core>;
         pub fn read_network(
-            core: UniquePtr<Core>,
+            core: &mut Core,
             model_path: &str,
             bin_path: &str,
         ) -> UniquePtr<CNNNetwork>;
+        pub fn load_network(
+            core: &mut Core,
+            network: UniquePtr<CNNNetwork>,
+            device: &str,
+        ) -> UniquePtr<ExecutableNetwork>;
 
         type CNNNetwork;
         pub fn setBatchSize(self: &mut CNNNetwork, size: usize);
+
+        type ExecutableNetwork;
+        pub fn create_infer_request(network: &mut ExecutableNetwork) -> UniquePtr<InferRequest>;
+
+        type InferRequest;
     }
 }
 
@@ -38,9 +48,14 @@ impl Core {
         Core { instance }
     }
 
-    pub fn read_network(self, model_path: &str, bin_path: &str) -> CNNNetwork {
-        let instance = ffi::read_network(self.instance, model_path, bin_path);
+    pub fn read_network(&mut self, model_path: &str, bin_path: &str) -> CNNNetwork {
+        let instance = ffi::read_network(&mut self.instance, model_path, bin_path);
         CNNNetwork { instance }
+    }
+
+    pub fn load_network(&mut self, network: CNNNetwork, device: &str) -> ExecutableNetwork {
+        let instance = ffi::load_network(&mut self.instance, network.instance, device);
+        ExecutableNetwork { instance }
     }
 }
 
@@ -52,6 +67,21 @@ impl CNNNetwork {
     pub fn set_batch_size(&mut self, size: usize) {
         self.instance.setBatchSize(size)
     }
+}
+
+pub struct ExecutableNetwork {
+    instance: UniquePtr<ffi::ExecutableNetwork>,
+}
+
+impl ExecutableNetwork {
+    pub fn create_infer_request(&mut self) -> InferRequest {
+        let instance = ffi::create_infer_request(&mut self.instance);
+        InferRequest { instance }
+    }
+}
+
+pub struct InferRequest {
+    instance: UniquePtr<ffi::InferRequest>,
 }
 
 #[cfg(test)]
@@ -68,7 +98,7 @@ mod test {
     // FIXME this test relies on a pre-built model in the filesystem--avoid this.
     #[test]
     fn read_network() {
-        let core = Core::new(None);
+        let mut core = Core::new(None);
         let dir = Path::new("../../../../test-openvino/");
         core.read_network(
             &dir.join("frozen_inference_graph.xml").to_string_lossy(),
@@ -78,13 +108,15 @@ mod test {
 
     // FIXME this test relies on a pre-built model in the filesystem--avoid this.
     #[test]
-    fn set_batch_size() {
-        let core = Core::new(None);
+    fn demo() {
+        let mut core = Core::new(None);
         let dir = Path::new("../../../../test-openvino/");
         let mut network = core.read_network(
             &dir.join("frozen_inference_graph.xml").to_string_lossy(),
             &dir.join("frozen_inference_graph.bin").to_string_lossy(),
         );
         network.set_batch_size(1);
+        let mut executable_network = core.load_network(network, "CPU");
+        let infer_request = executable_network.create_infer_request();
     }
 }
