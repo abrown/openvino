@@ -11,6 +11,9 @@ fn main() {
         .flag_if_supported("-std=c++14")
         .compile("ffi");
 
+    // Generate C API bindings for good measure.
+    generate_c_api("../c/include/c_api/ie_c_api.h");
+
     // Link libraries.
     let openvino_lib_dir = "../../../bin/intel64/Release/lib";
     link_libraries(openvino_lib_dir);
@@ -40,6 +43,7 @@ fn link_libraries(openvino_lib_dir: &str) {
     // Dynamically link in OpenVINO's inference engine (and dependencies).
     println!("cargo:rustc-link-lib=dylib=inference_engine");
     println!("cargo:rustc-link-lib=dylib=inference_engine_legacy");
+    println!("cargo:rustc-link-lib=dylib=inference_engine_c_api");
 }
 
 /// Add a path to the set of searchable paths Cargo uses for finding libraries to link to.
@@ -96,4 +100,17 @@ fn copy_openvino_plugin_file(openvino_lib_dir: &str) {
         format!("{}/plugins.xml", &deps_lib_dir),
     )
     .expect("to copy the plugins.xml file");
+}
+
+/// Generate bindings for the C API.
+fn generate_c_api(openvino_c_api_header: &str) {
+    let bindings = bindgen::Builder::default()
+        .header(openvino_c_api_header)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+        .generate()
+        .expect("generate C API bindings");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out.join("bindings.rs"))
+        .expect("failed to write bindings.rs");
 }

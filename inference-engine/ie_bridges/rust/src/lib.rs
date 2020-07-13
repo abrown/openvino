@@ -1,5 +1,7 @@
 //! Define the interface between Rust and OpenVINO's C++ [API](https://docs.openvinotoolkit.org/latest/usergroup16.html).
 
+mod c_api;
+
 use cxx::UniquePtr;
 
 /// This module uses the `cxx` library to safely bridge the gap to the C++ API exposed by OpenVINO.
@@ -67,6 +69,19 @@ impl CNNNetwork {
     pub fn set_batch_size(&mut self, size: usize) {
         self.instance.setBatchSize(size)
     }
+    pub fn get_input_name(&self, index: usize) -> Result<String, c_api::IEStatusCode> {
+        let network =
+            self.instance.as_ref().unwrap() as *const ffi::CNNNetwork as *const c_api::ie_network_t;
+        let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
+        let result = unsafe { c_api::ie_network_get_input_name(network, index as u64, name_ptr) };
+        if result == c_api::IEStatusCode_OK {
+            let returned_name = unsafe { std::ffi::CStr::from_ptr(name) };
+            Ok(returned_name.to_string_lossy().to_string())
+        } else {
+            Err(result)
+        }
+    }
 }
 
 pub struct ExecutableNetwork {
@@ -116,6 +131,8 @@ mod test {
             &dir.join("frozen_inference_graph.bin").to_string_lossy(),
         );
         network.set_batch_size(1);
+        assert_eq!(network.get_input_name(0).unwrap(), "image_tensor");
+
         let mut executable_network = core.load_network(network, "CPU");
         let infer_request = executable_network.create_infer_request();
     }
