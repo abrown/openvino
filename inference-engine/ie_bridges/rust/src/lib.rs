@@ -66,21 +66,63 @@ pub struct CNNNetwork {
 }
 
 impl CNNNetwork {
+    pub fn as_ptr(&self) -> *const c_api::ie_network_t {
+        // FIXME likely will cause bugs; relies on the pointer to the network being at offset 0 in both UniquePtr and ie_network_t.
+        &*self.instance as *const ffi::CNNNetwork as *const c_api::ie_network_t
+    }
+    pub fn as_mut(&mut self) -> *mut c_api::ie_network_t {
+        // FIXME likely will cause bugs; relies on the pointer to the network being at offset 0 in both UniquePtr and ie_network_t.
+        &mut *self.instance as *mut ffi::CNNNetwork as *mut c_api::ie_network_t
+    }
     pub fn set_batch_size(&mut self, size: usize) {
         self.instance.setBatchSize(size)
     }
-    pub fn get_input_name(&self, index: usize) -> Result<String, c_api::IEStatusCode> {
-        let network =
-            self.instance.as_ref().unwrap() as *const ffi::CNNNetwork as *const c_api::ie_network_t;
+    pub fn get_input_name(&self, index: usize) -> Result<String, InferenceError> {
+        let network = self.as_ptr();
         let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
         let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
         let result = unsafe { c_api::ie_network_get_input_name(network, index as u64, name_ptr) };
-        if result == c_api::IEStatusCode_OK {
-            let returned_name = unsafe { std::ffi::CStr::from_ptr(name) };
-            Ok(returned_name.to_string_lossy().to_string())
-        } else {
-            Err(result)
+        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()))
+    }
+    pub fn get_output_name(&self, index: usize) -> Result<String, InferenceError> {
+        let network = self.as_ptr();
+        let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
+        let result = unsafe { c_api::ie_network_get_output_name(network, index as u64, name_ptr) };
+        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()))
+    }
+
+    // TODO split into separate methods
+    pub fn prep_inputs_and_outputs(
+        &mut self,
+        input_name: &str,
+        output_name: &str,
+    ) -> Result<(), InferenceError> {
+        let network = self.as_mut();
+        let input_name = std::ffi::CString::new(input_name).unwrap().into_raw();
+        let output_name = std::ffi::CString::new(output_name).unwrap().into_raw();
+        let mut status = c_api::IEStatusCode_OK;
+        unsafe {
+            status |= c_api::ie_network_set_input_resize_algorithm(
+                network,
+                input_name,
+                c_api::resize_alg_e_RESIZE_BILINEAR,
+            );
+            status |= c_api::ie_network_set_input_layout(network, input_name, c_api::layout_e_NHWC);
+            status |=
+                c_api::ie_network_set_input_precision(network, input_name, c_api::precision_e_U8);
+
+            status |= c_api::ie_network_set_output_precision(
+                network,
+                output_name,
+                c_api::precision_e_FP32,
+            );
         }
+        InferenceError::from(status)
     }
 }
 
@@ -97,6 +139,107 @@ impl ExecutableNetwork {
 
 pub struct InferRequest {
     instance: UniquePtr<ffi::InferRequest>,
+}
+
+impl InferRequest {
+    pub fn set_blob(&mut self, name: &str, blob: Blob) -> Result<(), InferenceError> {
+        let infer_request = self.instance.as_mut().unwrap() as *mut ffi::InferRequest
+            as *mut c_api::ie_infer_request; // FIXME
+        let input_name = std::ffi::CString::new(name).unwrap().into_raw();
+        let result =
+            unsafe { c_api::ie_infer_request_set_blob(infer_request, input_name, blob.internal) };
+        InferenceError::from(result)
+    }
+}
+
+pub struct Blob {
+    internal: *const c_api::ie_blob_t,
+}
+
+impl Blob {
+    pub fn new(description: TensorDescription, data: &mut [u8]) -> Result<Self, InferenceError> {
+        let mut blob: *mut c_api::ie_blob_t = std::ptr::null_mut();
+        let blob_ptr: *mut *mut c_api::ie_blob_t = &mut blob;
+        let data_ptr = data as *mut [u8] as *mut std::os::raw::c_void;
+        let result = unsafe {
+            c_api::ie_blob_make_memory_from_preallocated(
+                description.as_ptr(),
+                data_ptr,
+                data.len() as u64,
+                blob_ptr,
+            )
+        };
+        InferenceError::from(result).and(Ok(Self { internal: blob }))
+    }
+}
+
+pub struct TensorDescription {
+    internal: c_api::tensor_desc_t,
+}
+
+impl TensorDescription {
+    pub fn new(layout: c_api::layout_e, dimensions: &[u64], precision: c_api::precision_e) -> Self {
+        // Setup dimensions.
+        assert!(dimensions.len() < 8);
+        let mut dims = [0; 8];
+        dims[..dimensions.len()].copy_from_slice(dimensions);
+
+        // Create the description structure.
+        Self {
+            internal: c_api::tensor_desc_t {
+                layout,
+                dims: c_api::dimensions_t {
+                    ranks: dimensions.len() as u64,
+                    dims,
+                },
+                precision,
+            },
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const c_api::tensor_desc_t {
+        &self.internal as *const _
+    }
+}
+
+#[derive(Debug)]
+pub enum InferenceError {
+    GeneralError,
+    NotImplemented,
+    NetworkNotLoaded,
+    ParameterMismatch,
+    NotFound,
+    OutOfBounds,
+    Unexpected,
+    RequestBusy,
+    ResultNotReady,
+    NotAllocated,
+    InferNotStarted,
+    NetworkNotReady,
+    Undefined,
+}
+
+impl InferenceError {
+    pub fn from(e: i32) -> Result<(), InferenceError> {
+        use InferenceError::*;
+        match e {
+            // TODO use enum constants from c_api: e.g. c_api::IEStatusCode_OK => ...
+            0 => Ok(()),
+            -1 => Err(GeneralError),
+            -2 => Err(NotImplemented),
+            -3 => Err(NetworkNotLoaded),
+            -4 => Err(ParameterMismatch),
+            -5 => Err(NotFound),
+            -6 => Err(OutOfBounds),
+            -7 => Err(Unexpected),
+            -8 => Err(RequestBusy),
+            -9 => Err(ResultNotReady),
+            -10 => Err(NotAllocated),
+            -11 => Err(InferNotStarted),
+            -12 => Err(NetworkNotReady),
+            _ => Err(Undefined),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,9 +274,26 @@ mod test {
             &dir.join("frozen_inference_graph.bin").to_string_lossy(),
         );
         network.set_batch_size(1);
-        assert_eq!(network.get_input_name(0).unwrap(), "image_tensor");
+
+        let input_name = network.get_input_name(0).unwrap();
+        assert_eq!(input_name, "image_tensor");
+        let output_name = network.get_output_name(0).unwrap();
+        assert_eq!(output_name, "DetectionOutput");
+        network.prep_inputs_and_outputs(&input_name, &output_name);
 
         let mut executable_network = core.load_network(network, "CPU");
-        let infer_request = executable_network.create_infer_request();
+        let mut infer_request = executable_network.create_infer_request();
+
+        // FIXME the dimensions for this file are hard-coded
+        // $ file val2017/000000062808.jpg
+        // val2017/000000062808.jpg: JPEG image data, JFIF standard 1.01, resolution (DPI), density 72x72, segment length 16, baseline, precision 8, 640x481, components 3
+        let desc = TensorDescription::new(
+            c_api::layout_e_NHWC,
+            &[1, 3, 481, 640], // {1, (size_t)img.mat_channels, (size_t)img.mat_height, (size_t)img.mat_width}
+            c_api::precision_e_U8,
+        );
+        let mut bytes = std::fs::read(dir.join("val2017/000000062808.jpg")).unwrap();
+        let blob = Blob::new(desc, &mut bytes).unwrap();
+        // TODO infer_request.set_blob(&input_name, blob).unwrap();
     }
 }
