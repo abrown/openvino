@@ -15,7 +15,7 @@ fn main() {
     generate_c_api("../c/include/c_api/ie_c_api.h");
 
     // Link libraries.
-    let openvino_lib_dir = "../../../bin/intel64/Release/lib";
+    let openvino_lib_dir = "../../../bin/intel64/Debug/lib";
     link_libraries(openvino_lib_dir);
 
     // Copy in the plugins.xml file.
