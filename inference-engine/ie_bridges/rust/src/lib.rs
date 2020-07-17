@@ -61,47 +61,67 @@ impl CNNNetwork {
     }
 
     pub fn get_input_name(&self, index: usize) -> Result<String, InferenceError> {
-        let network = self.as_ptr();
-        let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
-        let result = unsafe { c::ie_network_get_input_name(network, index as u64, name_ptr) };
-        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
+        let mut name = OutParameter::default(std::ptr::null_mut());
+        let result =
+            unsafe { c::ie_network_get_input_name(self.as_ptr(), index as u64, name.as_mut()) };
+        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name.val()) }
             .to_string_lossy()
             .into_owned()))
+        // FIXME name bytes may not be freed
     }
 
     pub fn get_output_name(&self, index: usize) -> Result<String, InferenceError> {
-        let network = self.as_ptr();
-        let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
-        let result = unsafe { c::ie_network_get_output_name(network, index as u64, name_ptr) };
-        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
+        let mut name = OutParameter::default(std::ptr::null_mut());
+        let result =
+            unsafe { c::ie_network_get_output_name(self.as_ptr(), index as u64, name.as_mut()) };
+        InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name.val()) }
             .to_string_lossy()
             .into_owned()))
+        // FIXME name bytes may not be freed
     }
 
-    // TODO split into separate methods
-    pub fn prep_inputs_and_outputs(
+    pub fn set_input_resize_algorithm(
         &mut self,
         input_name: &str,
-        output_name: &str,
+        algorithm: c::resize_alg_e,
     ) -> Result<(), InferenceError> {
-        let network = self.as_mut();
         let input_name = std::ffi::CString::new(input_name).unwrap().into_raw();
-        let output_name = std::ffi::CString::new(output_name).unwrap().into_raw();
-        let mut status = c::IEStatusCode_OK;
-        unsafe {
-            status |= c::ie_network_set_input_resize_algorithm(
-                network,
-                input_name,
-                c::resize_alg_e_RESIZE_BILINEAR,
-            );
-            status |= c::ie_network_set_input_layout(network, input_name, c::layout_e_NHWC);
-            status |= c::ie_network_set_input_precision(network, input_name, c::precision_e_U8);
+        let result = unsafe {
+            c::ie_network_set_input_resize_algorithm(self.as_mut(), input_name, algorithm)
+        };
+        InferenceError::from(result)
+    }
 
-            status |= c::ie_network_set_output_precision(network, output_name, c::precision_e_FP32);
-        }
-        InferenceError::from(status)
+    pub fn set_input_layout(
+        &mut self,
+        input_name: &str,
+        layout: c::layout_e,
+    ) -> Result<(), InferenceError> {
+        let input_name = std::ffi::CString::new(input_name).unwrap().into_raw();
+        let result = unsafe { c::ie_network_set_input_layout(self.as_mut(), input_name, layout) };
+        InferenceError::from(result)
+    }
+
+    pub fn set_input_precision(
+        &mut self,
+        input_name: &str,
+        precision: c::precision_e,
+    ) -> Result<(), InferenceError> {
+        let input_name = std::ffi::CString::new(input_name).unwrap().into_raw();
+        let result =
+            unsafe { c::ie_network_set_input_precision(self.as_mut(), input_name, precision) };
+        InferenceError::from(result)
+    }
+
+    pub fn set_output_precision(
+        &mut self,
+        output_name: &str,
+        precision: c::precision_e,
+    ) -> Result<(), InferenceError> {
+        let output_name = std::ffi::CString::new(output_name).unwrap().into_raw();
+        let result =
+            unsafe { c::ie_network_set_output_precision(self.as_mut(), output_name, precision) };
+        InferenceError::from(result)
     }
 }
 
@@ -331,6 +351,22 @@ impl InferenceError {
     }
 }
 
+/// Helper structure for simplifying the logic of C out parameters. TODO this might be able to
+/// implement `AsMut` and/or `Deref`.
+struct OutParameter<T>(T);
+
+impl<T> OutParameter<T> {
+    pub fn default(value: T) -> Self {
+        Self(value)
+    }
+    pub fn as_mut(&mut self) -> *mut T {
+        &mut self.0 as *mut T
+    }
+    pub fn val(self) -> T {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -402,14 +438,26 @@ mod test {
         );
         network.set_batch_size(1);
 
-        let input_name = network.get_input_name(0).unwrap();
+        let input_name = &network.get_input_name(0).unwrap();
         assert_eq!(input_name, "image_tensor");
-        let output_name = network.get_output_name(0).unwrap();
+        let output_name = &network.get_output_name(0).unwrap();
         assert_eq!(output_name, "DetectionOutput");
+
+        // Prepare inputs and outputs.
         network
-            .prep_inputs_and_outputs(&input_name, &output_name)
+            .set_input_resize_algorithm(input_name, c::resize_alg_e_RESIZE_BILINEAR)
+            .unwrap();
+        network
+            .set_input_layout(input_name, c::layout_e_NHWC)
+            .unwrap();
+        network
+            .set_input_precision(input_name, c::precision_e_U8)
+            .unwrap();
+        network
+            .set_output_precision(output_name, c::precision_e_FP32)
             .unwrap();
 
+        // Load the network.
         let mut executable_network = core.load_network(network, "CPU");
         let mut infer_request = executable_network.create_infer_request();
 
@@ -435,9 +483,10 @@ mod test {
             unsafe { std::slice::from_raw_parts(mat.data().unwrap() as *const u8, desc.len()) };
         let blob = Blob::new(desc, data).unwrap();
 
-        infer_request.set_blob(&input_name, blob).unwrap();
+        // Execute inference.
+        infer_request.set_blob(input_name, blob).unwrap();
         infer_request.infer().unwrap();
-        let mut results = infer_request.get_blob(&output_name).unwrap();
+        let mut results = infer_request.get_blob(output_name).unwrap();
         let buffer = results.buffer::<f32>().unwrap().to_vec();
 
         // Sort results.
@@ -450,6 +499,7 @@ mod test {
             .map(|(c, p)| Result(c, *p))
             .collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
         assert_eq!(
             &results[..5],
             &[
