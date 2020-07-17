@@ -180,41 +180,86 @@ impl Blob {
     pub fn from(pointer: *mut c_api::ie_blob_t) -> Self {
         Self { internal: pointer }
     }
-    pub fn new(description: TensorDescription, data: &[u8]) -> Result<Self, InferenceError> {
+
+    /// Allocate space in OpenVINO for an empty Blob.
+    pub fn allocate(description: TensorDescription) -> Result<Self, InferenceError> {
         let mut blob: *mut c_api::ie_blob_t = std::ptr::null_mut();
         let blob_ptr: *mut *mut c_api::ie_blob_t = &mut blob;
         let result = unsafe { c_api::ie_blob_make_memory(description.as_ptr(), blob_ptr) };
-        InferenceError::from(result)?;
-
-        let mut buffer = Blob::empty_buffer();
-        let buffer_ptr = &mut buffer as *mut c_api::ie_blob_buffer_t;
-        let result = unsafe { c_api::ie_blob_get_buffer(blob, buffer_ptr) };
-
-        // TODO assert buffer length and data.len() are the same.
-        let buffer_slice = unsafe {
-            std::slice::from_raw_parts_mut(buffer.__bindgen_anon_1.buffer as *mut u8, data.len())
-        };
-        buffer_slice.copy_from_slice(data);
-
         InferenceError::from(result).and(Ok(Self { internal: blob }))
     }
 
-    /// Gets the size of the current Blob in bytes.
+    /// Create a new blob by copying data in to the OpenVINO-allocated memory.
+    pub fn new(description: TensorDescription, data: &[u8]) -> Result<Self, InferenceError> {
+        let mut blob = Self::allocate(description)?;
+        let blob_len = blob.byte_len()?;
+        assert_eq!(
+            blob_len,
+            data.len(),
+            "The data to initialize ({} bytes) must be the same as the blob size ({} bytes).",
+            data.len(),
+            blob_len
+        );
+
+        // Copy the incoming data into the buffer.
+        let buffer = blob.buffer()?;
+        buffer.copy_from_slice(data);
+
+        Ok(blob)
+    }
+
+    pub fn tensor_desc(&self) -> Result<TensorDescription, InferenceError> {
+        let blob = self.internal as *const c_api::ie_blob_t;
+
+        let mut layout: c_api::layout_e = 0;
+        let layout_ptr = &mut layout as *mut c_api::layout_e;
+        let result = unsafe { c_api::ie_blob_get_layout(blob, layout_ptr) };
+        InferenceError::from(result)?;
+
+        let mut dimensions = c_api::dimensions_t {
+            ranks: 0,
+            dims: [0; 8usize],
+        };
+        let dimensions_ptr = &mut dimensions as *mut c_api::dimensions_t;
+        let result = unsafe { c_api::ie_blob_get_dims(blob, dimensions_ptr) };
+        InferenceError::from(result)?;
+
+        let mut precision: c_api::precision_e = 0;
+        let precision_ptr = &mut precision as *mut c_api::layout_e;
+        let result = unsafe { c_api::ie_blob_get_precision(blob, precision_ptr) };
+        InferenceError::from(result)?;
+
+        Ok(TensorDescription::new(
+            precision,
+            &dimensions.dims,
+            precision,
+        ))
+    }
+
+    /// Get the number of elements contained in the Blob.
     pub fn len(&mut self) -> Result<usize, InferenceError> {
+        let mut size = 0;
+        let size_ptr = &mut size as *mut std::os::raw::c_int;
+        let result = unsafe { c_api::ie_blob_size(self.internal, size_ptr) };
+        InferenceError::from(result).and(Ok(usize::try_from(size).unwrap()))
+    }
+
+    /// Get the size of the current Blob in bytes.
+    pub fn byte_len(&mut self) -> Result<usize, InferenceError> {
         let mut size = 0;
         let size_ptr = &mut size as *mut std::os::raw::c_int;
         let result = unsafe { c_api::ie_blob_byte_size(self.internal, size_ptr) };
         InferenceError::from(result).and(Ok(usize::try_from(size).unwrap()))
     }
 
-    pub fn buffer(&mut self) -> Result<&mut [u8], InferenceError> {
+    pub fn buffer<T>(&mut self) -> Result<&mut [T], InferenceError> {
         let mut buffer = Blob::empty_buffer();
         let buffer_ptr = &mut buffer as *mut c_api::ie_blob_buffer_t;
         let result = unsafe { c_api::ie_blob_get_buffer(self.internal, buffer_ptr) };
         InferenceError::from(result)?;
         let size = self.len()?;
         let slice = unsafe {
-            std::slice::from_raw_parts_mut(buffer.__bindgen_anon_1.buffer as *mut u8, size)
+            std::slice::from_raw_parts_mut(buffer.__bindgen_anon_1.buffer as *mut T, size)
         };
         Ok(slice)
     }
@@ -250,6 +295,12 @@ impl TensorDescription {
                 precision,
             },
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.internal.dims.dims[..self.internal.dims.ranks as usize]
+            .iter()
+            .fold(1, |a, &b| a * b as usize)
     }
 
     pub fn as_ptr(&self) -> *const c_api::tensor_desc_t {
@@ -379,7 +430,7 @@ mod test {
         let mut infer_request = executable_network.create_infer_request();
 
         // Read the image.
-        let mut mat = opencv::imgcodecs::imread(
+        let mat = opencv::imgcodecs::imread(
             &*Fixture::image().to_string_lossy(),
             opencv::imgcodecs::IMREAD_COLOR,
         )
@@ -395,15 +446,35 @@ mod test {
             c_api::precision_e_U8,
         );
 
-        // To extract the data as bytes, we should not check the type.
-        let data = unsafe { mat.data_typed_unchecked_mut() }.unwrap();
+        // Extract the OpenCV mat bytes and place them in an OpenVINO blob.
+        let data =
+            unsafe { std::slice::from_raw_parts(mat.data().unwrap() as *const u8, desc.len()) };
         let blob = Blob::new(desc, data).unwrap();
 
         infer_request.set_blob(&input_name, blob).unwrap();
         infer_request.infer().unwrap();
         let mut results = infer_request.get_blob(&output_name).unwrap();
-        let buffer = results.buffer().unwrap();
-        println!("{:?}", buffer);
-        assert_eq!(buffer.len(), 2800);
+        let buffer = results.buffer::<f32>().unwrap().to_vec();
+
+        // Sort results.
+        #[derive(Debug, PartialEq)]
+        struct Result(usize, f32); // (category, probability)
+        type Results = Vec<Result>;
+        let mut results: Results = buffer
+            .iter()
+            .enumerate()
+            .map(|(c, p)| Result(c, *p))
+            .collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        assert_eq!(
+            &results[..5],
+            &[
+                Result(15, 59.0),
+                Result(1, 1.0),
+                Result(8, 1.0),
+                Result(12, 1.0),
+                Result(16, 0.9939936),
+            ][..]
+        )
     }
 }
