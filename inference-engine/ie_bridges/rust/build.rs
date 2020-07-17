@@ -1,3 +1,8 @@
+//! This build script creates the necessary FFI bindings and links in the OpenVINO libraries.
+//!
+//! TODO intead of relying on pre-built libraries from OpenVINO, this could generate them here using
+//! Rust's [cmake](https://crates.io/crates/cmake).
+
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
