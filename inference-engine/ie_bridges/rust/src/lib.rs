@@ -1,97 +1,80 @@
 //! Define the interface between Rust and OpenVINO's C++ [API](https://docs.openvinotoolkit.org/latest/usergroup16.html).
+//! See the [binding] module for how this library calls into OpenVINO and [../build.rs] for how the
+//! OpenVINO libraries are linked in.
+//!
+//! TODO Unfortunately, the OpenVINO APIs return objects that cxx does not know yet how to
+//! wrap into a [UniquePtr]; therefore, we manually wrap these in `binding/cpp/bridge.h`
+//! before using in Rust. See https://github.com/dtolnay/cxx/issues/228 for discussion.
+//!
+//! TODO The Drop implementations for these structures still must be implemented.
 
-mod c_api;
+mod binding;
 
+use binding::c;
+use binding::cpp;
 use cxx::UniquePtr;
 use std::convert::TryFrom;
 
-/// This module uses the `cxx` library to safely bridge the gap to the C++ API exposed by OpenVINO.
-#[cxx::bridge(namespace = InferenceEngine)]
-mod ffi {
-    extern "C" {
-        include!("src/bridge.h");
-
-        type Core;
-        pub fn core_new(xml_config_file: &str) -> UniquePtr<Core>;
-        pub fn core_new_default() -> UniquePtr<Core>;
-        pub fn read_network(
-            core: &mut Core,
-            model_path: &str,
-            bin_path: &str,
-        ) -> UniquePtr<CNNNetwork>;
-        pub fn load_network(
-            core: &mut Core,
-            network: UniquePtr<CNNNetwork>,
-            device: &str,
-        ) -> UniquePtr<ExecutableNetwork>;
-
-        type CNNNetwork;
-        pub fn setBatchSize(self: &mut CNNNetwork, size: usize);
-
-        type ExecutableNetwork;
-        pub fn create_infer_request(network: &mut ExecutableNetwork) -> UniquePtr<InferRequest>;
-
-        type InferRequest;
-    }
-}
-
 /// See [Core](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1Core.html).
 pub struct Core {
-    instance: UniquePtr<ffi::Core>,
+    instance: UniquePtr<cpp::Core>,
 }
 
-/// Unfortunately, the OpenVINO APIs return objects that we must wrap in a [UniquePtr] in `bridge.h`
-/// before using in Rust.
 impl Core {
     pub fn new(xml_config_file: Option<&str>) -> Core {
         let instance = match xml_config_file {
-            None => ffi::core_new_default(),
-            Some(f) => ffi::core_new(f),
+            None => cpp::core_new_default(),
+            Some(f) => cpp::core_new(f),
         };
         Core { instance }
     }
 
     pub fn read_network(&mut self, model_path: &str, bin_path: &str) -> CNNNetwork {
-        let instance = ffi::read_network(&mut self.instance, model_path, bin_path);
+        let instance = cpp::read_network(&mut self.instance, model_path, bin_path);
         CNNNetwork { instance }
     }
 
     pub fn load_network(&mut self, network: CNNNetwork, device: &str) -> ExecutableNetwork {
-        let instance = ffi::load_network(&mut self.instance, network.instance, device);
+        let instance = cpp::load_network(&mut self.instance, network.instance, device);
         ExecutableNetwork { instance }
     }
 }
 
+/// See [CNNNetwork](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1CNNNetwork.html).
 pub struct CNNNetwork {
-    instance: UniquePtr<ffi::CNNNetwork>,
+    instance: UniquePtr<cpp::CNNNetwork>,
 }
 
 impl CNNNetwork {
-    pub fn as_ptr(&self) -> *const c_api::ie_network_t {
+    pub fn as_ptr(&self) -> *const c::ie_network_t {
         // FIXME likely will cause bugs; relies on the pointer to the network being at offset 0 in both UniquePtr and ie_network_t.
-        &*self.instance as *const ffi::CNNNetwork as *const c_api::ie_network_t
+        &*self.instance as *const cpp::CNNNetwork as *const c::ie_network_t
     }
-    pub fn as_mut(&mut self) -> *mut c_api::ie_network_t {
+
+    pub fn as_mut(&mut self) -> *mut c::ie_network_t {
         // FIXME likely will cause bugs; relies on the pointer to the network being at offset 0 in both UniquePtr and ie_network_t.
-        &mut *self.instance as *mut ffi::CNNNetwork as *mut c_api::ie_network_t
+        &mut *self.instance as *mut cpp::CNNNetwork as *mut c::ie_network_t
     }
+
     pub fn set_batch_size(&mut self, size: usize) {
         self.instance.setBatchSize(size)
     }
+
     pub fn get_input_name(&self, index: usize) -> Result<String, InferenceError> {
         let network = self.as_ptr();
         let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
         let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
-        let result = unsafe { c_api::ie_network_get_input_name(network, index as u64, name_ptr) };
+        let result = unsafe { c::ie_network_get_input_name(network, index as u64, name_ptr) };
         InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
             .to_string_lossy()
             .into_owned()))
     }
+
     pub fn get_output_name(&self, index: usize) -> Result<String, InferenceError> {
         let network = self.as_ptr();
         let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
         let name_ptr: *mut *mut std::os::raw::c_char = &mut name;
-        let result = unsafe { c_api::ie_network_get_output_name(network, index as u64, name_ptr) };
+        let result = unsafe { c::ie_network_get_output_name(network, index as u64, name_ptr) };
         InferenceError::from(result).and(Ok(unsafe { std::ffi::CStr::from_ptr(name) }
             .to_string_lossy()
             .into_owned()))
@@ -106,91 +89,75 @@ impl CNNNetwork {
         let network = self.as_mut();
         let input_name = std::ffi::CString::new(input_name).unwrap().into_raw();
         let output_name = std::ffi::CString::new(output_name).unwrap().into_raw();
-        let mut status = c_api::IEStatusCode_OK;
+        let mut status = c::IEStatusCode_OK;
         unsafe {
-            status |= c_api::ie_network_set_input_resize_algorithm(
+            status |= c::ie_network_set_input_resize_algorithm(
                 network,
                 input_name,
-                c_api::resize_alg_e_RESIZE_BILINEAR,
+                c::resize_alg_e_RESIZE_BILINEAR,
             );
-            status |= c_api::ie_network_set_input_layout(network, input_name, c_api::layout_e_NHWC);
-            status |=
-                c_api::ie_network_set_input_precision(network, input_name, c_api::precision_e_U8);
+            status |= c::ie_network_set_input_layout(network, input_name, c::layout_e_NHWC);
+            status |= c::ie_network_set_input_precision(network, input_name, c::precision_e_U8);
 
-            status |= c_api::ie_network_set_output_precision(
-                network,
-                output_name,
-                c_api::precision_e_FP32,
-            );
+            status |= c::ie_network_set_output_precision(network, output_name, c::precision_e_FP32);
         }
         InferenceError::from(status)
     }
 }
 
+/// See [ExecutableNetwork](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1ExecutableNetwork.html).
 pub struct ExecutableNetwork {
-    instance: UniquePtr<ffi::ExecutableNetwork>,
+    instance: UniquePtr<cpp::ExecutableNetwork>,
 }
 
 impl ExecutableNetwork {
     pub fn create_infer_request(&mut self) -> InferRequest {
-        let instance = ffi::create_infer_request(&mut self.instance);
+        let instance = cpp::create_infer_request(&mut self.instance);
         InferRequest { instance }
     }
 }
 
+/// See [InferRequest](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1InferRequest.html).
 pub struct InferRequest {
-    instance: UniquePtr<ffi::InferRequest>,
+    instance: UniquePtr<cpp::InferRequest>,
 }
 
 impl InferRequest {
-    pub fn as_ptr(&self) -> *const c_api::ie_infer_request_t {
-        // FIXME likely will cause bugs; relies on the pointer to the request being at offset 0 in both UniquePtr and ie_network_t.
-        &*self.instance as *const ffi::InferRequest as *const c_api::ie_infer_request_t
-    }
-    pub fn as_mut(&mut self) -> *mut c_api::ie_infer_request_t {
-        // FIXME likely will cause bugs; relies on the pointer to the request being at offset 0 in both UniquePtr and ie_network_t.
-        &mut *self.instance as *mut ffi::InferRequest as *mut c_api::ie_infer_request_t
-    }
     pub fn set_blob(&mut self, name: &str, blob: Blob) -> Result<(), InferenceError> {
         let infer_request_ptr = self.as_mut();
         let name_ptr = std::ffi::CString::new(name).unwrap().into_raw();
         let blob_ptr = blob.internal;
-        let result =
-            unsafe { c_api::ie_infer_request_set_blob(infer_request_ptr, name_ptr, blob_ptr) };
+        let result = unsafe { c::ie_infer_request_set_blob(infer_request_ptr, name_ptr, blob_ptr) };
         InferenceError::from(result)
     }
+
     pub fn get_blob(&mut self, name: &str) -> Result<Blob, InferenceError> {
         let name_ptr = std::ffi::CString::new(name).unwrap().into_raw();
-        let mut blob: *mut c_api::ie_blob_t = std::ptr::null_mut();
-        let blob_ptr: *mut *mut c_api::ie_blob_t = &mut blob;
-        let result = unsafe { c_api::ie_infer_request_get_blob(self.as_mut(), name_ptr, blob_ptr) };
+        let mut blob: *mut c::ie_blob_t = std::ptr::null_mut();
+        let blob_ptr: *mut *mut c::ie_blob_t = &mut blob;
+        let result = unsafe { c::ie_infer_request_get_blob(self.as_mut(), name_ptr, blob_ptr) };
         InferenceError::from(result).and(Ok(Blob::from(blob)))
     }
+
     pub fn infer(&mut self) -> Result<(), InferenceError> {
-        let result = unsafe { c_api::ie_infer_request_infer(self.as_mut()) };
+        let result = unsafe { c::ie_infer_request_infer(self.as_mut()) };
         InferenceError::from(result)
+    }
+
+    fn as_mut(&mut self) -> *mut c::ie_infer_request_t {
+        // FIXME likely will cause bugs; relies on the pointer to the request being at offset 0 in both UniquePtr and ie_network_t.
+        &mut *self.instance as *mut cpp::InferRequest as *mut c::ie_infer_request_t
     }
 }
 
+/// See [Blob](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1Blob.html).
 pub struct Blob {
-    internal: *mut c_api::ie_blob_t,
+    internal: *mut c::ie_blob_t,
 }
 
 impl Blob {
-    pub fn from(pointer: *mut c_api::ie_blob_t) -> Self {
-        Self { internal: pointer }
-    }
-
-    /// Allocate space in OpenVINO for an empty Blob.
-    pub fn allocate(description: TensorDescription) -> Result<Self, InferenceError> {
-        let mut blob: *mut c_api::ie_blob_t = std::ptr::null_mut();
-        let blob_ptr: *mut *mut c_api::ie_blob_t = &mut blob;
-        let result = unsafe { c_api::ie_blob_make_memory(description.as_ptr(), blob_ptr) };
-        InferenceError::from(result).and(Ok(Self { internal: blob }))
-    }
-
-    /// Create a new blob by copying data in to the OpenVINO-allocated memory.
-    pub fn new(description: TensorDescription, data: &[u8]) -> Result<Self, InferenceError> {
+    /// Create a new [Blob] by copying data in to the OpenVINO-allocated memory.
+    pub fn new(description: TensorDesc, data: &[u8]) -> Result<Self, InferenceError> {
         let mut blob = Self::allocate(description)?;
         let blob_len = blob.byte_len()?;
         assert_eq!(
@@ -208,39 +175,49 @@ impl Blob {
         Ok(blob)
     }
 
-    pub fn tensor_desc(&self) -> Result<TensorDescription, InferenceError> {
-        let blob = self.internal as *const c_api::ie_blob_t;
+    /// Allocate space in OpenVINO for an empty [Blob].
+    pub fn allocate(description: TensorDesc) -> Result<Self, InferenceError> {
+        let mut blob: *mut c::ie_blob_t = std::ptr::null_mut();
+        let blob_ptr: *mut *mut c::ie_blob_t = &mut blob;
+        let result = unsafe { c::ie_blob_make_memory(description.as_ptr(), blob_ptr) };
+        InferenceError::from(result).and(Ok(Self { internal: blob }))
+    }
 
-        let mut layout: c_api::layout_e = 0;
-        let layout_ptr = &mut layout as *mut c_api::layout_e;
-        let result = unsafe { c_api::ie_blob_get_layout(blob, layout_ptr) };
+    /// Construct a Blob from its associated pointer FIXME figure out drop behavior.
+    pub fn from(pointer: *mut c::ie_blob_t) -> Self {
+        Self { internal: pointer }
+    }
+
+    /// Return the tensor description of this [Blob].
+    pub fn tensor_desc(&self) -> Result<TensorDesc, InferenceError> {
+        let blob = self.internal as *const c::ie_blob_t;
+
+        let mut layout: c::layout_e = 0;
+        let layout_ptr = &mut layout as *mut c::layout_e;
+        let result = unsafe { c::ie_blob_get_layout(blob, layout_ptr) };
         InferenceError::from(result)?;
 
-        let mut dimensions = c_api::dimensions_t {
+        let mut dimensions = c::dimensions_t {
             ranks: 0,
             dims: [0; 8usize],
         };
-        let dimensions_ptr = &mut dimensions as *mut c_api::dimensions_t;
-        let result = unsafe { c_api::ie_blob_get_dims(blob, dimensions_ptr) };
+        let dimensions_ptr = &mut dimensions as *mut c::dimensions_t;
+        let result = unsafe { c::ie_blob_get_dims(blob, dimensions_ptr) };
         InferenceError::from(result)?;
 
-        let mut precision: c_api::precision_e = 0;
-        let precision_ptr = &mut precision as *mut c_api::layout_e;
-        let result = unsafe { c_api::ie_blob_get_precision(blob, precision_ptr) };
+        let mut precision: c::precision_e = 0;
+        let precision_ptr = &mut precision as *mut c::layout_e;
+        let result = unsafe { c::ie_blob_get_precision(blob, precision_ptr) };
         InferenceError::from(result)?;
 
-        Ok(TensorDescription::new(
-            precision,
-            &dimensions.dims,
-            precision,
-        ))
+        Ok(TensorDesc::new(precision, &dimensions.dims, precision))
     }
 
     /// Get the number of elements contained in the Blob.
     pub fn len(&mut self) -> Result<usize, InferenceError> {
         let mut size = 0;
         let size_ptr = &mut size as *mut std::os::raw::c_int;
-        let result = unsafe { c_api::ie_blob_size(self.internal, size_ptr) };
+        let result = unsafe { c::ie_blob_size(self.internal, size_ptr) };
         InferenceError::from(result).and(Ok(usize::try_from(size).unwrap()))
     }
 
@@ -248,14 +225,15 @@ impl Blob {
     pub fn byte_len(&mut self) -> Result<usize, InferenceError> {
         let mut size = 0;
         let size_ptr = &mut size as *mut std::os::raw::c_int;
-        let result = unsafe { c_api::ie_blob_byte_size(self.internal, size_ptr) };
+        let result = unsafe { c::ie_blob_byte_size(self.internal, size_ptr) };
         InferenceError::from(result).and(Ok(usize::try_from(size).unwrap()))
     }
 
+    /// Retrieve the [Blob]'s data as a mutable slice.
     pub fn buffer<T>(&mut self) -> Result<&mut [T], InferenceError> {
         let mut buffer = Blob::empty_buffer();
-        let buffer_ptr = &mut buffer as *mut c_api::ie_blob_buffer_t;
-        let result = unsafe { c_api::ie_blob_get_buffer(self.internal, buffer_ptr) };
+        let buffer_ptr = &mut buffer as *mut c::ie_blob_buffer_t;
+        let result = unsafe { c::ie_blob_get_buffer(self.internal, buffer_ptr) };
         InferenceError::from(result)?;
         let size = self.len()?;
         let slice = unsafe {
@@ -264,21 +242,23 @@ impl Blob {
         Ok(slice)
     }
 
-    fn empty_buffer() -> c_api::ie_blob_buffer_t {
-        c_api::ie_blob_buffer_t {
-            __bindgen_anon_1: c_api::ie_blob_buffer__bindgen_ty_1 {
+    fn empty_buffer() -> c::ie_blob_buffer_t {
+        c::ie_blob_buffer_t {
+            __bindgen_anon_1: c::ie_blob_buffer__bindgen_ty_1 {
                 buffer: std::ptr::null_mut(),
             },
         }
     }
 }
 
-pub struct TensorDescription {
-    internal: c_api::tensor_desc_t,
+/// See [TensorDesc](https://docs.openvinotoolkit.org/latest/classInferenceEngine_1_1TensorDesc.html).
+pub struct TensorDesc {
+    internal: c::tensor_desc_t,
 }
 
-impl TensorDescription {
-    pub fn new(layout: c_api::layout_e, dimensions: &[u64], precision: c_api::precision_e) -> Self {
+impl TensorDesc {
+    /// Construct a new [TensorDesc] from its C API components.
+    pub fn new(layout: c::layout_e, dimensions: &[u64], precision: c::precision_e) -> Self {
         // Setup dimensions.
         assert!(dimensions.len() < 8);
         let mut dims = [0; 8];
@@ -286,9 +266,9 @@ impl TensorDescription {
 
         // Create the description structure.
         Self {
-            internal: c_api::tensor_desc_t {
+            internal: c::tensor_desc_t {
                 layout,
-                dims: c_api::dimensions_t {
+                dims: c::dimensions_t {
                     ranks: dimensions.len() as u64,
                     dims,
                 },
@@ -297,17 +277,21 @@ impl TensorDescription {
         }
     }
 
+    /// Get the number of elements described by this [TensorDesc].
     pub fn len(&self) -> usize {
         self.internal.dims.dims[..self.internal.dims.ranks as usize]
             .iter()
             .fold(1, |a, &b| a * b as usize)
     }
 
-    pub fn as_ptr(&self) -> *const c_api::tensor_desc_t {
+    fn as_ptr(&self) -> *const c::tensor_desc_t {
         &self.internal as *const _
     }
 }
 
+/// See [IEStatusCode](https://docs.openvinotoolkit.org/latest/ie_c_api/ie__c__api_8h.html#a391683b1e8e26df8b58d7033edd9ee83).
+/// TODO Replace this in bindgen with [newtype_enum](https://docs.rs/bindgen/0.54.1/bindgen/struct.Builder.html#method.newtype_enum)
+/// or [rustified_enum](https://docs.rs/bindgen/0.54.1/bindgen/struct.Builder.html#method.rustified_enum).
 #[derive(Debug)]
 pub enum InferenceError {
     GeneralError,
@@ -329,20 +313,19 @@ impl InferenceError {
     pub fn from(e: i32) -> Result<(), InferenceError> {
         use InferenceError::*;
         match e {
-            // TODO use enum constants from c_api: e.g. c_api::IEStatusCode_OK => ...
-            0 => Ok(()),
-            -1 => Err(GeneralError),
-            -2 => Err(NotImplemented),
-            -3 => Err(NetworkNotLoaded),
-            -4 => Err(ParameterMismatch),
-            -5 => Err(NotFound),
-            -6 => Err(OutOfBounds),
-            -7 => Err(Unexpected),
-            -8 => Err(RequestBusy),
-            -9 => Err(ResultNotReady),
-            -10 => Err(NotAllocated),
-            -11 => Err(InferNotStarted),
-            -12 => Err(NetworkNotReady),
+            c::IEStatusCode_OK => Ok(()),
+            c::IEStatusCode_GENERAL_ERROR => Err(GeneralError),
+            c::IEStatusCode_NOT_IMPLEMENTED => Err(NotImplemented),
+            c::IEStatusCode_NETWORK_NOT_LOADED => Err(NetworkNotLoaded),
+            c::IEStatusCode_PARAMETER_MISMATCH => Err(ParameterMismatch),
+            c::IEStatusCode_NOT_FOUND => Err(NotFound),
+            c::IEStatusCode_OUT_OF_BOUNDS => Err(OutOfBounds),
+            c::IEStatusCode_UNEXPECTED => Err(Unexpected),
+            c::IEStatusCode_REQUEST_BUSY => Err(RequestBusy),
+            c::IEStatusCode_RESULT_NOT_READY => Err(ResultNotReady),
+            c::IEStatusCode_NOT_ALLOCATED => Err(NotAllocated),
+            c::IEStatusCode_INFER_NOT_STARTED => Err(InferNotStarted),
+            c::IEStatusCode_NETWORK_NOT_READ => Err(NetworkNotReady),
             _ => Err(Undefined),
         }
     }
@@ -356,6 +339,7 @@ mod test {
 
     // FIXME these tests rely on a pre-built model and images in the filesystem--avoid this.
     struct Fixture;
+
     impl Fixture {
         fn dir() -> PathBuf {
             PathBuf::from("../../../../test-openvino/")
@@ -435,15 +419,15 @@ mod test {
             opencv::imgcodecs::IMREAD_COLOR,
         )
         .unwrap();
-        let desc = TensorDescription::new(
-            c_api::layout_e_NHWC,
+        let desc = TensorDesc::new(
+            c::layout_e_NHWC,
             &[
                 1,
                 mat.channels().unwrap() as u64,
                 mat.size().unwrap().height as u64,
                 mat.size().unwrap().width as u64, // TODO .try_into().unwrap()
             ], // {1, (size_t)img.mat_channels, (size_t)img.mat_height, (size_t)img.mat_width}
-            c_api::precision_e_U8,
+            c::precision_e_U8,
         );
 
         // Extract the OpenCV mat bytes and place them in an OpenVINO blob.

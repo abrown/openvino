@@ -6,7 +6,7 @@ fn main() {
     mark_rerun_files();
 
     // Use cxx to compile the library; see https://github.com/dtolnay/cxx/blob/master/demo-rs/build.rs.
-    cxx_build::bridge("src/lib.rs")
+    cxx_build::bridge("src/binding/cpp/mod.rs")
         .include("../../include") // The location of the OpenVINO headers.
         .flag_if_supported("-std=c++14")
         .compile("ffi");
